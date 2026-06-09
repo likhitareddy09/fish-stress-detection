@@ -3,3 +3,12 @@ __pycache__/
 *.pyc
 *.pt
 .vscode/
+# Dataset files
+ai_cv/data/
+
+# YOLO training outputs
+runs/
+
+# Python cache
+__pycache__/
+*.pyc

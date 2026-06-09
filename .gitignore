@@ -1,7 +1,7 @@
 venv/
 __pycache__/
 *.pyc
-*.pt
+
 .vscode/
 # Dataset files
 ai_cv/data/

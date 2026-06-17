@@ -23,10 +23,10 @@ An AI + Hardware based system for monitoring fish stress in aquaculture environm
 - Likhita
 
 ### Backend Team
-- Yashwanth
+- Taahira
 
 ### Hardware Team
-- Tahira
+- Yashwanth
 
 ## Current Status
 

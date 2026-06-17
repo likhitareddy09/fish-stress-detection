@@ -1,11 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from app.models import Tank, SensorReading, BehaviorReading, StressScore, Alert
 
 from app.core.config import settings
 from app.core.database import engine, Base
 from app.api import health
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -13,16 +13,15 @@ async def lifespan(app: FastAPI):
     print("  Fish Stress Detection Backend Starting...")
     print("=" * 50)
 
-    # Try to connect to DB — skip if PostgreSQL not installed yet (Day 2)
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-            print("  Database tables created/verified.")
+            print("  Database connected. All tables verified.")
     except Exception as e:
-        print(f"  [WARNING] Database not available yet: {e.__class__.__name__}")
-        print("  [WARNING] Install PostgreSQL on Day 2. Server starting without DB.")
+        print(f"  [WARNING] Database error: {e.__class__.__name__}: {e}")
+        print("  Server starting without DB connection.")
 
-    print("  Server ready. Visit http://localhost:8000/docs")
+    print("  Server ready at http://localhost:8000/docs")
     print("=" * 50)
 
     yield

@@ -10,17 +10,15 @@ from app.schemas.schemas import (
     SensorReadingCreate, SensorReadingResponse, SensorHistoryResponse,
     BehaviorReadingCreate, BehaviorReadingResponse,
     StressScoreResponse,
+    BehaviorIngestResponse,
 )
 from app.services.fsi_engine import compute_fsi
 
 router = APIRouter()
 
 
-# ── Sensor readings ───────────────────────────────────────────────────────────
-
 @router.get("/{tank_id}/latest", response_model=SensorReadingResponse)
 async def get_latest_sensor(tank_id: str, db: AsyncSession = Depends(get_db)):
-    """Get the most recent sensor reading for a tank."""
     tank = await _get_tank_or_404(tank_id, db)
     result = await db.execute(
         select(SensorReading)
@@ -37,28 +35,18 @@ async def get_latest_sensor(tank_id: str, db: AsyncSession = Depends(get_db)):
 @router.get("/{tank_id}/history", response_model=SensorHistoryResponse)
 async def get_sensor_history(
     tank_id: str,
-    hours: int = Query(default=24, ge=1, le=168, description="How many hours of history to return"),
+    hours: int = Query(default=24, ge=1, le=168),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Get sensor reading history for charting in Streamlit.
-    Default: last 24 hours. Max: 7 days (168 hours).
-    """
     tank = await _get_tank_or_404(tank_id, db)
     since = datetime.utcnow() - timedelta(hours=hours)
-
     result = await db.execute(
         select(SensorReading)
         .where(SensorReading.tank_id == tank.id, SensorReading.timestamp >= since)
         .order_by(SensorReading.timestamp)
     )
     readings = result.scalars().all()
-
-    return SensorHistoryResponse(
-        tank_id=tank_id,
-        readings=readings,
-        count=len(readings),
-    )
+    return SensorHistoryResponse(tank_id=tank_id, readings=readings, count=len(readings))
 
 
 @router.post("/{tank_id}/readings", response_model=SensorReadingResponse, status_code=201)
@@ -67,12 +55,7 @@ async def ingest_sensor_reading(
     data: SensorReadingCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Manually POST a sensor reading (used for testing without MQTT).
-    In production, readings come in via the MQTT consumer automatically.
-    """
     tank = await _get_tank_or_404(tank_id, db)
-
     reading = SensorReading(
         tank_id=tank.id,
         temperature=data.temperature,
@@ -82,16 +65,14 @@ async def ingest_sensor_reading(
         turbidity=data.turbidity,
     )
     db.add(reading)
-    await db.flush()  # Get the reading ID before computing FSI
+    await db.flush()
 
-    # Compute and save FSI score immediately
     fsi_score, stress_level, wq_score = compute_fsi(
         temperature=data.temperature,
         ph=data.ph,
         dissolved_o2=data.dissolved_o2,
         ammonia=data.ammonia,
     )
-    from app.models.models import StressScore
     score = StressScore(
         tank_id=tank.id,
         fsi_score=fsi_score,
@@ -105,18 +86,17 @@ async def ingest_sensor_reading(
     return reading
 
 
-# ── Behavior readings (sent by Likhita's CV module) ──────────────────────────
-
-@router.post("/{tank_id}/behavior", response_model=BehaviorReadingResponse, status_code=201)
+@router.post(
+    "/{tank_id}/behavior",
+    response_model=BehaviorIngestResponse,
+    status_code=201,
+    summary="Receive behavioral data from CV module",
+)
 async def ingest_behavior_reading(
     tank_id: str,
     data: BehaviorReadingCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Receive behavioral features from Likhita's CV module.
-    Called after each 30-second video analysis window.
-    """
     tank = await _get_tank_or_404(tank_id, db)
 
     behavior = BehaviorReading(
@@ -134,7 +114,6 @@ async def ingest_behavior_reading(
     db.add(behavior)
     await db.flush()
 
-    # Update FSI with behavioral component if we have recent sensor data
     sensor_result = await db.execute(
         select(SensorReading)
         .where(SensorReading.tank_id == tank.id)
@@ -154,25 +133,48 @@ async def ingest_behavior_reading(
         inactivity_pct=data.inactivity_pct,
     )
 
-    from app.models.models import StressScore
+    from app.services.fsi_engine import _normalize_behavior
+    beh_score = None
+    if any(v is not None for v in [data.avg_speed, data.turning_frequency,
+                                    data.surface_visits, data.inactivity_pct]):
+        beh_score = round(
+            _normalize_behavior(data.avg_speed, data.turning_frequency,
+                                data.surface_visits, data.inactivity_pct), 4
+        )
+
     score = StressScore(
         tank_id=tank.id,
         fsi_score=fsi_score,
         stress_level=stress_level,
         water_quality_score=wq_score,
+        behavioral_score=beh_score,
         behavior_reading_id=behavior.id,
     )
     db.add(score)
     await db.commit()
     await db.refresh(behavior)
-    return behavior
 
+    level_messages = {
+        "normal":   "All good — fish appear healthy.",
+        "warning":  "Elevated stress detected. Monitor closely.",
+        "critical": "CRITICAL stress — immediate attention required!",
+    }
 
-# ── Stress scores ─────────────────────────────────────────────────────────────
+    return BehaviorIngestResponse(
+        behavior_reading_id=behavior.id,
+        tank_id=tank_id,
+        fish_count=data.fish_count,
+        timestamp=behavior.timestamp,
+        fsi_score=fsi_score,
+        stress_level=stress_level,
+        behavioral_score=beh_score,
+        water_quality_score=wq_score,
+        message=level_messages.get(stress_level.value, "Score computed."),
+    )
+
 
 @router.get("/{tank_id}/stress/current", response_model=StressScoreResponse)
 async def get_current_stress(tank_id: str, db: AsyncSession = Depends(get_db)):
-    """Get the most recent computed FSI score for a tank."""
     tank = await _get_tank_or_404(tank_id, db)
     result = await db.execute(
         select(StressScore)
@@ -192,7 +194,6 @@ async def get_stress_history(
     hours: int = Query(default=24, ge=1, le=168),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get FSI score history for plotting the stress trend chart."""
     tank = await _get_tank_or_404(tank_id, db)
     since = datetime.utcnow() - timedelta(hours=hours)
     result = await db.execute(
@@ -203,10 +204,7 @@ async def get_stress_history(
     return result.scalars().all()
 
 
-# ── Helper ────────────────────────────────────────────────────────────────────
-
 async def _get_tank_or_404(tank_id: str, db: AsyncSession) -> Tank:
-    """Shared helper — look up tank by string ID or raise 404."""
     result = await db.execute(select(Tank).where(Tank.tank_id == tank_id))
     tank = result.scalar_one_or_none()
     if not tank:

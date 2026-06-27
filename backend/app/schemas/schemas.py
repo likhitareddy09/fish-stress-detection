@@ -161,3 +161,21 @@ class DashboardSummary(BaseModel):
     active_alerts: List[AlertResponse]
     alert_count:   int
     readings_today:int
+
+class BehaviorIngestResponse(BaseModel):
+    """
+    What the backend returns to Likhita after receiving behavior data.
+    She can use this to confirm her data was received and see the impact on FSI.
+    """
+    behavior_reading_id: int
+    tank_id:             str
+    fish_count:          Optional[int]
+    timestamp:           datetime
+    fsi_score:           float
+    stress_level:        StressLevel
+    behavioral_score:    Optional[float]
+    water_quality_score: Optional[float]
+    message:             str
+
+    class Config:
+        from_attributes = True

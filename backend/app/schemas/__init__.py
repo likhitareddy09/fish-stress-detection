@@ -5,4 +5,5 @@ from app.schemas.schemas import (
     StressScoreResponse,
     AlertResponse, AlertResolveRequest,
     DashboardSummary,
+    BehaviorIngestResponse,
 )

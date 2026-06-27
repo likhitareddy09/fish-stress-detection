@@ -10,6 +10,7 @@ from app.schemas.schemas import (
     SensorReadingCreate, SensorReadingResponse, SensorHistoryResponse,
     BehaviorReadingCreate, BehaviorReadingResponse,
     StressScoreResponse,
+    BehaviorIngestResponse,
 )
 from app.services.fsi_engine import compute_fsi
 
@@ -107,34 +108,50 @@ async def ingest_sensor_reading(
 
 # ── Behavior readings (sent by Likhita's CV module) ──────────────────────────
 
-@router.post("/{tank_id}/behavior", response_model=BehaviorReadingResponse, status_code=201)
+@router.post(
+    "/{tank_id}/behavior",
+    response_model=BehaviorIngestResponse,
+    status_code=201,
+    summary="Receive behavioral data from CV module",
+    description="""
+    Called by Likhita's CV module every 30 seconds with aggregated fish behavior metrics.
+    
+    The backend will:
+    1. Save the behavior reading to the database
+    2. Fetch the latest water quality reading from Yashwanth's sensors
+    3. Compute the combined FSI = 0.60 × WQ + 0.40 × behavior
+    4. Return the computed stress score so the CV module can log it
+    
+    **Do NOT send:** fish_id, behavior_score, stress_level — these are computed here.
+    **DO send:** raw behavioral measurements as listed below.
+    """,
+)
 async def ingest_behavior_reading(
     tank_id: str,
     data: BehaviorReadingCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Receive behavioral features from Likhita's CV module.
-    Called after each 30-second video analysis window.
-    """
+    from app.schemas.schemas import BehaviorIngestResponse
+
     tank = await _get_tank_or_404(tank_id, db)
 
+    # Save behavior reading
     behavior = BehaviorReading(
-        tank_id=tank.id,
-        fish_count=data.fish_count,
-        avg_speed=data.avg_speed,
-        avg_acceleration=data.avg_acceleration,
+        tank_id=          tank.id,
+        fish_count=       data.fish_count,
+        avg_speed=        data.avg_speed,
+        avg_acceleration= data.avg_acceleration,
         turning_frequency=data.turning_frequency,
         motion_variability=data.motion_variability,
-        surface_visits=data.surface_visits,
-        bottom_dwelling=data.bottom_dwelling,
-        inactivity_pct=data.inactivity_pct,
+        surface_visits=   data.surface_visits,
+        bottom_dwelling=  data.bottom_dwelling,
+        inactivity_pct=   data.inactivity_pct,
         schooling_density=data.schooling_density,
     )
     db.add(behavior)
     await db.flush()
 
-    # Update FSI with behavioral component if we have recent sensor data
+    # Get latest water quality for combined FSI
     sensor_result = await db.execute(
         select(SensorReading)
         .where(SensorReading.tank_id == tank.id)
@@ -143,30 +160,60 @@ async def ingest_behavior_reading(
     )
     latest_sensor = sensor_result.scalar_one_or_none()
 
+    # Compute combined FSI
     fsi_score, stress_level, wq_score = compute_fsi(
-        temperature=latest_sensor.temperature if latest_sensor else None,
-        ph=latest_sensor.ph if latest_sensor else None,
-        dissolved_o2=latest_sensor.dissolved_o2 if latest_sensor else None,
-        ammonia=latest_sensor.ammonia if latest_sensor else None,
-        avg_speed=data.avg_speed,
+        temperature=      latest_sensor.temperature   if latest_sensor else None,
+        ph=               latest_sensor.ph            if latest_sensor else None,
+        dissolved_o2=     latest_sensor.dissolved_o2  if latest_sensor else None,
+        ammonia=          latest_sensor.ammonia        if latest_sensor else None,
+        avg_speed=        data.avg_speed,
         turning_frequency=data.turning_frequency,
-        surface_visits=data.surface_visits,
-        inactivity_pct=data.inactivity_pct,
+        surface_visits=   data.surface_visits,
+        inactivity_pct=   data.inactivity_pct,
     )
 
-    from app.models.models import StressScore
+    # Compute behavioral component separately for the response
+    from app.services.fsi_engine import _normalize_behavior, BEH_WEIGHTS
+    beh_score = None
+    if any(v is not None for v in [data.avg_speed, data.turning_frequency,
+                                    data.surface_visits, data.inactivity_pct]):
+        beh_score = round(
+            _normalize_behavior(
+                data.avg_speed, data.turning_frequency,
+                data.surface_visits, data.inactivity_pct
+            ), 4
+        )
+
+    # Save stress score with both components
     score = StressScore(
-        tank_id=tank.id,
-        fsi_score=fsi_score,
-        stress_level=stress_level,
-        water_quality_score=wq_score,
-        behavior_reading_id=behavior.id,
+        tank_id=             tank.id,
+        fsi_score=           fsi_score,
+        stress_level=        stress_level,
+        water_quality_score= wq_score,
+        behavioral_score=    beh_score,
+        behavior_reading_id= behavior.id,
     )
     db.add(score)
     await db.commit()
     await db.refresh(behavior)
-    return behavior
 
+    level_messages = {
+        "normal":   "All good — fish appear healthy.",
+        "warning":  "Elevated stress detected. Monitor closely.",
+        "critical": "CRITICAL stress — immediate attention required!",
+    }
+
+    return BehaviorIngestResponse(
+        behavior_reading_id= behavior.id,
+        tank_id=             tank_id,
+        fish_count=          data.fish_count,
+        timestamp=           behavior.timestamp,
+        fsi_score=           fsi_score,
+        stress_level=        stress_level,
+        behavioral_score=    beh_score,
+        water_quality_score= wq_score,
+        message=             level_messages.get(stress_level.value, "Score computed."),
+    )
 
 # ── Stress scores ─────────────────────────────────────────────────────────────
 

@@ -1,1 +1,1 @@
-from app.api import health, tanks, sensors
+from app.api import health, tanks, sensors, alerts, auth

@@ -22,13 +22,27 @@ async def list_all_tanks(db: AsyncSession = Depends(get_db)):
 
 @router.post("/", response_model=TankResponse, status_code=status.HTTP_201_CREATED)
 async def create_tank(tank: TankCreate, db: AsyncSession = Depends(get_db)):
-    """Register a new fish tank. Usually called once during setup."""
-    existing = await db.execute(select(Tank).where(Tank.tank_id == tank.tank_id))
-    if existing.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Tank with ID '{tank.tank_id}' already exists."
-        )
+    """
+    Register a new fish tank.
+    If the tank_id already exists but was deactivated, it gets reactivated.
+    """
+    result = await db.execute(select(Tank).where(Tank.tank_id == tank.tank_id))
+    existing = result.scalar_one_or_none()
+
+    if existing:
+        if existing.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Tank with ID '{tank.tank_id}' already exists."
+            )
+        # Reactivate the soft-deleted tank with new details
+        for field, value in tank.model_dump().items():
+            setattr(existing, field, value)
+        existing.is_active = True
+        await db.commit()
+        await db.refresh(existing)
+        return existing
+
     new_tank = Tank(**tank.model_dump())
     db.add(new_tank)
     await db.commit()

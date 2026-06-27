@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.database import engine, Base
-from app.api import health, tanks, sensors
+from app.api import health, tanks, sensors, alerts, auth
 from app.models.models import Tank, SensorReading, BehaviorReading, StressScore, Alert
 
 logging.basicConfig(
@@ -80,9 +80,11 @@ app.add_middleware(
 )
 
 # All routers
-app.include_router(health.router,   prefix="/api/v1",            tags=["Health"])
-app.include_router(tanks.router,    prefix="/api/v1/tanks",       tags=["Tanks"])
-app.include_router(sensors.router,  prefix="/api/v1/sensors",     tags=["Sensors"])
+app.include_router(health.router,   prefix="/api/v1",             tags=["Health"])
+app.include_router(auth.router,     prefix="/api/v1/auth",         tags=["Auth"])
+app.include_router(tanks.router,    prefix="/api/v1/tanks",        tags=["Tanks"])
+app.include_router(sensors.router,  prefix="/api/v1/sensors",      tags=["Sensors"])
+app.include_router(alerts.router,   prefix="/api/v1/alerts",       tags=["Alerts"])
 
 
 @app.get("/", tags=["Root"])

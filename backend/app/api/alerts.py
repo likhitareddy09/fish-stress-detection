@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 
 from app.core.database import get_db
 from app.models.models import Alert, AlertStatus, Tank, StressLevel
+import logging
+logger = logging.getLogger(__name__)
 from app.schemas.schemas import AlertResponse, AlertResolveRequest
 
 router = APIRouter()
@@ -51,21 +53,41 @@ async def resolve_alert(
 ):
     """
     Mark an alert as resolved.
-    Called from dashboard when someone manually fixes the problem.
+    Sends a Telegram resolution notice automatically.
     """
     result = await db.execute(select(Alert).where(Alert.id == alert_id))
-    alert = result.scalar_one_or_none()
+    alert  = result.scalar_one_or_none()
     if not alert:
         raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found.")
     if alert.status == AlertStatus.RESOLVED:
         raise HTTPException(status_code=400, detail="Alert is already resolved.")
 
-    alert.status      = AlertStatus.RESOLVED
-    alert.resolved_at = datetime.utcnow()
+    alert.status       = AlertStatus.RESOLVED
+    alert.resolved_at  = datetime.utcnow()
     alert.resolved_note = body.note
+
+    # Mark notification flags
+    alert.telegram_sent = True
 
     await db.commit()
     await db.refresh(alert)
+
+    # Send resolution notice to Telegram
+    tank_result = await db.execute(
+        select(Tank).where(Tank.id == alert.tank_id)
+    )
+    tank = tank_result.scalar_one_or_none()
+    tank_id_str = tank.tank_id if tank else "unknown"
+
+    try:
+        from app.services.alert_service import send_telegram_resolution
+        import asyncio
+        asyncio.create_task(
+            send_telegram_resolution(tank_id_str, alert_id, body.note)
+        )
+    except Exception as e:
+        logger.warning(f"Could not send resolution notice: {e}")
+
     return alert
 
 

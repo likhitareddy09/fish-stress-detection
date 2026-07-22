@@ -83,6 +83,24 @@ async def ingest_sensor_reading(
     db.add(score)
     await db.commit()
     await db.refresh(reading)
+    # Fire Telegram alert if WARNING or CRITICAL
+    from app.models.models import StressLevel as SL
+    if stress_level in (SL.WARNING, SL.CRITICAL):
+        import asyncio
+        from app.services.alert_service import send_telegram_alert
+        from app.services.fsi_engine import get_alert_types
+        alert_types = get_alert_types(
+            temperature=data.temperature,
+            ph=data.ph,
+            dissolved_o2=data.dissolved_o2,
+            ammonia=data.ammonia,
+        )
+        asyncio.create_task(
+            send_telegram_alert(tank_id, fsi_score, stress_level, alert_types)
+        )
+
+    await db.commit()
+    await db.refresh(reading)
     return reading
 
 

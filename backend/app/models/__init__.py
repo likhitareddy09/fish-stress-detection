@@ -4,6 +4,7 @@ from app.models.models import (
     BehaviorReading,
     StressScore,
     Alert,
+    FishStressRecord,
     StressLevel,
     AlertStatus,
 )

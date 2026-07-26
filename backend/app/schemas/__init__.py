@@ -6,4 +6,5 @@ from app.schemas.schemas import (
     AlertResponse, AlertResolveRequest,
     DashboardSummary,
     BehaviorIngestResponse,
+    FishRecord, FishBatchCreate, FishStressResult, FishBatchResponse,
 )

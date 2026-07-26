@@ -3,6 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from typing import List
 from datetime import datetime, timedelta
+import logging
+logger = logging.getLogger(__name__)
 
 from app.core.database import get_db
 from app.models.models import Tank, SensorReading, BehaviorReading, StressScore
@@ -11,8 +13,9 @@ from app.schemas.schemas import (
     BehaviorReadingCreate, BehaviorReadingResponse,
     StressScoreResponse,
     BehaviorIngestResponse,
+    FishBatchCreate, FishBatchResponse, FishStressResult,
 )
-from app.services.fsi_engine import compute_fsi
+from app.services.fsi_engine import compute_fsi, compute_fish_fsi
 
 router = APIRouter()
 
@@ -221,6 +224,140 @@ async def get_stress_history(
     )
     return result.scalars().all()
 
+# ── Per-fish batch endpoint (professor's requirement) ────────────────────────
+
+@router.post(
+    "/{tank_id}/behavior/batch",
+    response_model=FishBatchResponse,
+    status_code=201,
+    summary="Receive per-fish behavioral data from CV module",
+    description="""
+    Accepts an array of per-fish behavioral records from Likhita's CV module.
+    
+    For each fish the backend:
+    1. Computes an individual stress score using behavioral metrics
+    2. Stores the result in fish_stress_records table
+    3. Associates the latest environmental sensor readings as context
+    
+    Returns individual stress scores + tank-level summary.
+    
+    Send this every 30 seconds after each analysis window.
+    """,
+)
+async def ingest_fish_batch(
+    tank_id: str,
+    data: FishBatchCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models.models import FishStressRecord
+    from datetime import datetime, timezone
+
+    tank = await _get_tank_or_404(tank_id, db)
+
+    # Fetch latest environmental context from Yashwanth's sensors
+    sensor_result = await db.execute(
+        select(SensorReading)
+        .where(SensorReading.tank_id == tank.id)
+        .order_by(desc(SensorReading.timestamp))
+        .limit(1)
+    )
+    latest_sensor = sensor_result.scalar_one_or_none()
+
+    # Parse analysis timestamp if provided
+    analysis_ts = None
+    if data.timestamp:
+        try:
+            analysis_ts = datetime.fromisoformat(data.timestamp.replace("Z", "+00:00"))
+        except Exception:
+            analysis_ts = datetime.now(timezone.utc)
+
+    # Process each fish individually
+    results = []
+    critical_fish = []
+
+    for fish_record in data.fish:
+        stress_score, stress_level = compute_fish_fsi(
+            avg_speed=          fish_record.avg_speed,
+            avg_acceleration=   fish_record.avg_acceleration,
+            turning_frequency=  fish_record.turning_frequency,
+            motion_variability= fish_record.motion_variability,
+            surface_visits=     fish_record.surface_visits,
+            bottom_dwelling=    fish_record.bottom_dwelling,
+            inactivity_pct=     fish_record.inactivity_pct,
+        )
+
+        # Save individual record to DB
+        record = FishStressRecord(
+            tank_id=            tank.id,
+            fish_id=            fish_record.fish_id,
+            avg_speed=          fish_record.avg_speed,
+            avg_acceleration=   fish_record.avg_acceleration,
+            turning_frequency=  fish_record.turning_frequency,
+            motion_variability= fish_record.motion_variability,
+            surface_visits=     fish_record.surface_visits,
+            bottom_dwelling=    fish_record.bottom_dwelling,
+            inactivity_pct=     fish_record.inactivity_pct,
+            stress_score=       stress_score,
+            stress_level=       stress_level,
+            # Environmental context snapshot
+            temperature_ctx=    latest_sensor.temperature  if latest_sensor else None,
+            ph_ctx=             latest_sensor.ph           if latest_sensor else None,
+            do_ctx=             latest_sensor.dissolved_o2 if latest_sensor else None,
+            analysis_timestamp= analysis_ts,
+        )
+        db.add(record)
+
+        results.append(FishStressResult(
+            fish_id=       fish_record.fish_id,
+            stress_score=  stress_score,
+            stress_level=  stress_level,
+            avg_speed=     fish_record.avg_speed,
+            surface_visits=fish_record.surface_visits,
+        ))
+
+        from app.models.models import StressLevel as SL
+        if stress_level == SL.CRITICAL:
+            critical_fish.append(fish_record.fish_id)
+
+    await db.commit()
+
+    # Build tank-level summary
+    scores = [r.stress_score for r in results]
+    avg_stress = round(sum(scores) / len(scores), 4) if scores else 0.0
+    most_stressed = max(results, key=lambda r: r.stress_score) if results else None
+
+    # Fire Telegram alert if any fish is critical
+    if critical_fish:
+        from app.models.models import StressLevel as SL
+        from app.services.alert_service import send_telegram_alert
+        import asyncio
+        asyncio.create_task(
+            send_telegram_alert(
+                tank_id=     tank_id,
+                fsi=         max(scores),
+                level=       SL.CRITICAL,
+                alert_types= [f"FISH_{fid}_CRITICAL" for fid in critical_fish],
+            )
+        )
+
+    logger.info(
+        f"Batch processed: tank={tank_id} fish={len(results)} "
+        f"avg_stress={avg_stress:.3f} critical={len(critical_fish)}"
+    )
+
+    return FishBatchResponse(
+        tank_id=            tank_id,
+        fish_count=         len(results),
+        analysis_timestamp= data.timestamp,
+        results=            results,
+        tank_summary={
+            "avg_stress":            avg_stress,
+            "critical_fish":         len(critical_fish),
+            "critical_fish_ids":     critical_fish,
+            "most_stressed_fish_id": most_stressed.fish_id if most_stressed else None,
+            "most_stressed_score":   most_stressed.stress_score if most_stressed else None,
+        },
+    )
 
 async def _get_tank_or_404(tank_id: str, db: AsyncSession) -> Tank:
     result = await db.execute(select(Tank).where(Tank.tank_id == tank_id))

@@ -228,3 +228,59 @@ def get_alert_types(
     if ammonia is not None and ammonia > THRESHOLDS["nh3_high"]:
         alerts.append("HIGH_AMMONIA")
     return alerts
+
+def compute_fish_fsi(
+    avg_speed:          float = None,
+    avg_acceleration:   float = None,
+    turning_frequency:  float = None,
+    motion_variability: float = None,
+    surface_visits:     int   = None,
+    bottom_dwelling:    float = None,
+    inactivity_pct:     float = None,
+) -> tuple[float, StressLevel]:
+    """
+    Compute stress score for a single individual fish.
+    Uses behavioral metrics only — no water quality needed here
+    because the tank-level WQ is already captured in sensor readings.
+
+    Returns:
+        stress_score (float): 0.0 – 1.0
+        stress_level (StressLevel): NORMAL / WARNING / CRITICAL
+    """
+    score = 0.0
+
+    # High speed = erratic thrashing = stress (weight 0.20)
+    if avg_speed is not None:
+        if avg_speed > 100:
+            score += 0.20 * min((avg_speed - 100) / 100.0, 1.0)
+        elif avg_speed < 3:
+            # Very slow = lethargic = also stress
+            score += 0.20 * min((3 - avg_speed) / 3.0, 1.0)
+
+    # High acceleration = sudden bursts = stress (weight 0.15)
+    if avg_acceleration is not None and avg_acceleration > 5:
+        score += 0.15 * min((avg_acceleration - 5) / 10.0, 1.0)
+
+    # High turning = erratic direction changes = stress (weight 0.20)
+    if turning_frequency is not None and turning_frequency > 6:
+        score += 0.20 * min((turning_frequency - 6) / 14.0, 1.0)
+
+    # High motion variability = inconsistent swimming = stress (weight 0.15)
+    if motion_variability is not None and motion_variability > 20:
+        score += 0.15 * min((motion_variability - 20) / 40.0, 1.0)
+
+    # Surface visits = gasping for air = severe O2 stress (weight 0.20)
+    if surface_visits is not None and surface_visits > 0:
+        score += 0.20 * min(surface_visits / 8.0, 1.0)
+
+    # Bottom dwelling = lethargy = chronic stress (weight 0.05)
+    if bottom_dwelling is not None and bottom_dwelling > 60:
+        score += 0.05 * min((bottom_dwelling - 60) / 40.0, 1.0)
+
+    # High inactivity = listlessness = stress (weight 0.05)
+    if inactivity_pct is not None and inactivity_pct > 50:
+        score += 0.05 * min((inactivity_pct - 50) / 50.0, 1.0)
+
+    score = round(min(score, 1.0), 4)
+    level = _score_to_level(score)
+    return score, level

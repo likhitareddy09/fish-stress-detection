@@ -202,3 +202,55 @@ class Alert(Base):
 
     def __repr__(self):
         return f"<Alert tank={self.tank_id} type={self.alert_type} severity={self.severity}>"
+
+
+class FishStressRecord(Base):
+    """
+    Individual per-fish stress record.
+    Created by POST /api/v1/sensors/{tank_id}/behavior/batch
+    
+    One row per fish per 30-second analysis window.
+    Stores behavioral metrics + computed stress score + environmental context.
+    
+    Professor's requirement: individual fish stress detection,
+    not a single tank-level score.
+    """
+    __tablename__ = "fish_stress_records"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    tank_id         = Column(Integer, ForeignKey("tanks.id", ondelete="CASCADE"), nullable=False)
+
+    # Fish identification (ByteTrack persistent ID from Likhita's CV module)
+    fish_id         = Column(Integer, nullable=False, index=True)
+
+    # Behavioral metrics sent by Likhita
+    avg_speed           = Column(Float)     # pixels/second
+    avg_acceleration    = Column(Float)     # pixels/second²
+    turning_frequency   = Column(Float)     # turns/minute
+    motion_variability  = Column(Float)     # std dev of speed
+    surface_visits      = Column(Integer, default=0)   # count — O2 stress indicator
+    bottom_dwelling     = Column(Float)     # % time at bottom
+    inactivity_pct      = Column(Float)     # % of time stationary
+
+    # Computed by backend (NOT sent by Likhita)
+    stress_score    = Column(Float, nullable=False)        # 0.0 – 1.0
+    stress_level    = Column(SAEnum(StressLevel), nullable=False)
+
+    # Environmental context at time of analysis (from Yashwanth's latest reading)
+    temperature_ctx = Column(Float)     # °C at time of this window
+    ph_ctx          = Column(Float)     # pH at time of this window
+    do_ctx          = Column(Float)     # Dissolved O2 at time of this window
+
+    # Timestamps
+    analysis_timestamp = Column(DateTime(timezone=True), nullable=True)
+    recorded_at        = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    tank = relationship("Tank")
+
+    __table_args__ = (
+        Index("ix_fish_stress_tank_fish", "tank_id", "fish_id"),
+        Index("ix_fish_stress_recorded", "recorded_at"),
+    )
+
+    def __repr__(self):
+        return f"<FishStressRecord tank={self.tank_id} fish={self.fish_id} score={self.stress_score}>"

@@ -179,3 +179,53 @@ class BehaviorIngestResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+# ── Per-fish batch schemas (professor's requirement) ──────────────────────────
+
+class FishRecord(BaseModel):
+    """
+    One fish's behavioral metrics for a single 30-second window.
+    Sent by Likhita's CV module as part of a batch.
+    """
+    fish_id:           int            = Field(..., ge=0,    example=2)
+    avg_speed:         Optional[float]= Field(None, ge=0,   example=3.2)
+    avg_acceleration:  Optional[float]= Field(None,         example=1.5)
+    turning_frequency: Optional[float]= Field(None, ge=0,   example=6.0)
+    motion_variability:Optional[float]= Field(None, ge=0,   example=2.8)
+    surface_visits:    Optional[int]  = Field(None, ge=0,   example=1)
+    bottom_dwelling:   Optional[float]= Field(None, ge=0, le=100, example=12.0)
+    inactivity_pct:    Optional[float]= Field(None, ge=0, le=100, example=15.0)
+
+
+class FishBatchCreate(BaseModel):
+    """
+    Batch payload from Likhita's CV module.
+    One record per tracked fish for the current 30-second window.
+    """
+    tank_id:   str              = Field(..., example="tank_01")
+    timestamp: Optional[str]   = Field(None, example="2026-07-08T12:30:00Z")
+    fish:      List[FishRecord] = Field(..., min_length=1)
+
+
+class FishStressResult(BaseModel):
+    """Stress result for one individual fish — returned in the batch response."""
+    fish_id:      int
+    stress_score: float
+    stress_level: StressLevel
+    avg_speed:    Optional[float]
+    surface_visits: Optional[int]
+
+    class Config:
+        from_attributes = True
+
+
+class FishBatchResponse(BaseModel):
+    """
+    Response returned to Likhita after processing a batch of fish records.
+    Includes individual results + a tank-level summary.
+    """
+    tank_id:            str
+    fish_count:         int
+    analysis_timestamp: Optional[str]
+    results:            List[FishStressResult]
+    tank_summary: dict  # avg_stress, critical_fish, most_stressed_fish_id

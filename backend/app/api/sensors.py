@@ -359,6 +359,80 @@ async def ingest_fish_batch(
         },
     )
 
+@router.get("/{tank_id}/fish-stress/latest")
+async def get_latest_fish_stress(
+    tank_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get the most recent per-fish stress results.
+    Called by the Streamlit dashboard to display the per-fish stress table.
+    Returns all fish records from the latest analysis window.
+    """
+    from app.models.models import FishStressRecord
+
+    tank = await _get_tank_or_404(tank_id, db)
+
+    # Get the most recent analysis timestamp
+    latest_ts_result = await db.execute(
+        select(FishStressRecord.analysis_timestamp)
+        .where(FishStressRecord.tank_id == tank.id)
+        .order_by(desc(FishStressRecord.recorded_at))
+        .limit(1)
+    )
+    latest_ts = latest_ts_result.scalar_one_or_none()
+
+    if not latest_ts:
+        # No fish stress records exist yet
+        return {
+            "tank_id":        tank_id,
+            "fish":           [],
+            "fish_count":     0,
+            "critical_count": 0,
+            "avg_stress":     0.0,
+            "analysis_time":  None,
+            "message":        "No fish stress data yet. Run Likhita's main.py first.",
+        }
+
+    # Get all fish records from that same analysis window
+    records_result = await db.execute(
+        select(FishStressRecord)
+        .where(
+            FishStressRecord.tank_id == tank.id,
+            FishStressRecord.analysis_timestamp == latest_ts,
+        )
+        .order_by(FishStressRecord.stress_score.desc())
+    )
+    records = records_result.scalars().all()
+
+    fish_list = [
+        {
+            "fish_id":       r.fish_id,
+            "stress_score":  r.stress_score,
+            "stress_level":  r.stress_level.value,
+            "avg_speed":     r.avg_speed,
+            "surface_visits":r.surface_visits,
+            "inactivity_pct":r.inactivity_pct,
+            "temperature_ctx": r.temperature_ctx,
+            "ph_ctx":          r.ph_ctx,
+            "do_ctx":          r.do_ctx,
+        }
+        for r in records
+    ]
+
+    critical = sum(1 for f in fish_list if f["stress_level"] == "critical")
+    avg      = round(sum(f["stress_score"] for f in fish_list) / len(fish_list), 4) if fish_list else 0.0
+
+    return {
+        "tank_id":        tank_id,
+        "analysis_time":  latest_ts.isoformat(),
+        "fish":           fish_list,
+        "fish_count":     len(fish_list),
+        "critical_count": critical,
+        "avg_stress":     avg,
+    }
+
+
 async def _get_tank_or_404(tank_id: str, db: AsyncSession) -> Tank:
     result = await db.execute(select(Tank).where(Tank.tank_id == tank_id))
     tank = result.scalar_one_or_none()

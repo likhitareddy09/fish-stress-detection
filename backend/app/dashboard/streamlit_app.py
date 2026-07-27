@@ -29,11 +29,13 @@ st.markdown("""
 .stress-warning { color: #BA7517; font-size: 2.2rem; font-weight: 600; }
 .stress-critical{ color: #E24B4A; font-size: 2.2rem; font-weight: 600; }
 .alert-critical { background:#FCEBEB; border-left:4px solid #E24B4A;
-                  padding:8px 12px; border-radius:4px; margin:4px 0; }
+                  padding:8px 12px; border-radius:4px; margin:4px 0; color:#3A1414; }
 .alert-warning  { background:#FAEEDA; border-left:4px solid #BA7517;
-                  padding:8px 12px; border-radius:4px; margin:4px 0; }
+                  padding:8px 12px; border-radius:4px; margin:4px 0; color:#3D2A05; }
 .alert-normal   { background:#E1F5EE; border-left:4px solid #1D9E75;
-                  padding:8px 12px; border-radius:4px; margin:4px 0; }
+                  padding:8px 12px; border-radius:4px; margin:4px 0; color:#0D3D2E; }
+.alert-critical strong, .alert-warning strong, .alert-normal strong { color: inherit; }
+.alert-critical small, .alert-warning small, .alert-normal small { opacity: 0.75; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -159,6 +161,27 @@ def fsi_trend_chart(scores: list) -> go.Figure:
     return fig
 
 
+def get_recommendation(level, alert_list, fish_summary):
+    """Build a recommendation message based on stress level and active alerts."""
+    if level == "critical":
+        lines = ["🚨 **Immediate intervention required.**"]
+        if any("TEMP" in a for a in alert_list):
+            lines.append("• Check water temperature — adjust heater/cooler")
+        if any("PH" in a for a in alert_list):
+            lines.append("• Test pH — add buffer solution, retest in 30 min")
+        if any("DO" in a for a in alert_list):
+            lines.append("• Check aerator — increase surface agitation immediately")
+        if any("AMMONIA" in a for a in alert_list):
+            lines.append("• Do 25% water change — ammonia spike detected")
+        if fish_summary and fish_summary.get("critical_count", 0) > 0:
+            lines.append(f"• {fish_summary['critical_count']} fish showing critical stress — inspect tank now")
+        return "\n".join(lines)
+    elif level == "warning":
+        return "⚠️ **Monitor closely.** Check all equipment. Retest in 30 minutes."
+    else:
+        return "✅ **All good.** Fish are healthy. Continue regular monitoring schedule."
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -166,7 +189,6 @@ with st.sidebar:
     st.caption("Real-time aquaculture health system")
     st.divider()
 
-    # Load available tanks
     tanks_data = api_get("/tanks/")
     tank_options = ["tank_01"]
     if tanks_data:
@@ -197,34 +219,63 @@ with st.sidebar:
         st.rerun()
 
 
-# ── Main dashboard ────────────────────────────────────────────────────────────
+# ── Load all data (must happen before anything uses it) ──────────────────────
 
 st.title(f"Fish Stress Monitor — {tank_id.upper()}")
 last_update = st.empty()
 
-# Load all data
-dashboard  = api_get(f"/tanks/{tank_id}/dashboard")
-history    = api_get(f"/sensors/{tank_id}/history", {"hours": hours})
-fsi_hist   = api_get(f"/sensors/{tank_id}/stress/history", {"hours": hours})
-alert_stats= api_get("/alerts/stats/summary", {"hours": 24})
+dashboard   = api_get(f"/tanks/{tank_id}/dashboard")
+history     = api_get(f"/sensors/{tank_id}/history", {"hours": hours})
+fsi_hist    = api_get(f"/sensors/{tank_id}/stress/history", {"hours": hours})
+alert_stats = api_get("/alerts/stats/summary", {"hours": 24})
+fish_data   = api_get(f"/sensors/{tank_id}/fish-stress/latest")
 
 if not dashboard:
     st.error(f"Cannot reach backend API at {API}. Is the server running on port 8000?")
     st.stop()
 
-# Extract data
-tank_info   = dashboard.get("tank", {})
-sensor      = dashboard.get("latest_sensor") or {}
-stress      = dashboard.get("latest_stress") or {}
-alerts      = dashboard.get("active_alerts", [])
-fsi_score   = stress.get("fsi_score", 0.0) or 0.0
-stress_level= stress.get("stress_level", "normal") or "normal"
+tank_info      = dashboard.get("tank", {})
+sensor         = dashboard.get("latest_sensor") or {}
+stress         = dashboard.get("latest_stress") or {}
+alerts         = dashboard.get("active_alerts", [])
+fsi_score      = stress.get("fsi_score", 0.0) or 0.0
+stress_level   = stress.get("stress_level", "normal") or "normal"
 readings_today = dashboard.get("readings_today", 0)
 alert_count    = dashboard.get("alert_count", 0)
+readings       = history.get("readings", []) if history else []
+alert_types    = [a.get("alert_type", "") for a in alerts]
 
 last_update.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')} | "
                     f"Readings today: {readings_today} | "
                     f"Tank: {tank_info.get('name', tank_id)}")
+
+st.divider()
+
+# ── Row 0: Video panel + quick stats ─────────────────────────────────────────
+col_video, col_info = st.columns([2, 1])
+
+with col_video:
+    st.subheader("🎥 Processed Video Feed")
+    uploaded_video = st.file_uploader(
+        "Upload processed video from CV module",
+        type=["mp4", "avi", "mov"],
+        help="Upload the output video from Likhita's CV pipeline"
+    )
+    if uploaded_video:
+        st.video(uploaded_video)
+    else:
+        st.info("Upload a processed video from Likhita's CV module to display it here.")
+
+with col_info:
+    st.subheader("📊 Quick Stats")
+    if fish_data:
+        st.metric("🐟 Fish tracked", fish_data.get("fish_count", 0))
+        st.metric("🚨 Critical",     fish_data.get("critical_count", 0))
+        st.metric("📈 Avg stress",   f"{fish_data.get('avg_stress', 0):.3f}")
+    else:
+        st.metric("🐟 Fish tracked", "—")
+        st.metric("🚨 Critical",     "—")
+        st.metric("📈 Avg stress",   "—")
 
 st.divider()
 
@@ -233,7 +284,7 @@ col_gauge, col_temp, col_ph, col_do, col_alerts = st.columns([2, 1, 1, 1, 1])
 
 with col_gauge:
     st.subheader("Fish Stress Index")
-    st.plotly_chart(fsi_gauge(fsi_score, stress_level), use_container_width=True, key="gauge")
+    st.plotly_chart(fsi_gauge(fsi_score, stress_level), width="stretch", key="gauge")
     emoji = {"normal": "✅ NORMAL", "warning": "⚠️ WARNING", "critical": "🚨 CRITICAL"}.get(stress_level, "❓")
     css_class = f"stress-{stress_level}"
     st.markdown(f'<p class="{css_class}">{emoji}</p>', unsafe_allow_html=True)
@@ -277,7 +328,6 @@ st.divider()
 
 # ── Row 2: Sensor charts ──────────────────────────────────────────────────────
 st.subheader("📈 Sensor History")
-readings = history.get("readings", []) if history else []
 
 tab_temp, tab_ph, tab_do, tab_fsi = st.tabs(["Temperature", "pH", "Dissolved O₂", "FSI Trend"])
 
@@ -285,7 +335,7 @@ with tab_temp:
     if readings:
         st.plotly_chart(
             sensor_chart(readings, "temperature", "Temperature (°C)", "#E24B4A", low=22, high=28),
-            use_container_width=True, key="chart_temp"
+            width="stretch", key="chart_temp"
         )
         temps = [r["temperature"] for r in readings if r.get("temperature") is not None]
         if temps:
@@ -300,7 +350,7 @@ with tab_ph:
     if readings:
         st.plotly_chart(
             sensor_chart(readings, "ph", "pH", "#378ADD", low=6.5, high=8.0),
-            use_container_width=True, key="chart_ph"
+            width="stretch", key="chart_ph"
         )
         phs = [r["ph"] for r in readings if r.get("ph") is not None]
         if phs:
@@ -315,7 +365,7 @@ with tab_do:
     if readings:
         st.plotly_chart(
             sensor_chart(readings, "dissolved_o2", "Dissolved O₂ (mg/L)", "#1D9E75", low=5.0),
-            use_container_width=True, key="chart_do"
+            width="stretch", key="chart_do"
         )
     else:
         st.info("No dissolved oxygen data yet.")
@@ -323,7 +373,7 @@ with tab_do:
 with tab_fsi:
     fsi_scores = fsi_hist if isinstance(fsi_hist, list) else []
     if fsi_scores:
-        st.plotly_chart(fsi_trend_chart(fsi_scores), use_container_width=True, key="chart_fsi")
+        st.plotly_chart(fsi_trend_chart(fsi_scores), width="stretch", key="chart_fsi")
         fsi_vals = [s["fsi_score"] for s in fsi_scores if s.get("fsi_score") is not None]
         if fsi_vals:
             c1, c2, c3, c4 = st.columns(4)
@@ -336,7 +386,37 @@ with tab_fsi:
 
 st.divider()
 
-# ── Row 3: Alerts panel ───────────────────────────────────────────────────────
+# ── Row 3: Per-fish stress table ─────────────────────────────────────────────
+st.subheader("🐟 Individual Fish Stress (Latest Window)")
+
+if fish_data and fish_data.get("fish"):
+    fish_df = pd.DataFrame(fish_data["fish"])
+
+    def color_stress(val):
+        colors = {"normal": "background-color: #E1F5EE",
+                  "warning": "background-color: #FAEEDA",
+                  "critical": "background-color: #FCEBEB"}
+        return colors.get(val, "")
+
+    display_cols = ["fish_id", "stress_score", "stress_level",
+                    "avg_speed", "surface_visits", "inactivity_pct"]
+    display_cols = [c for c in display_cols if c in fish_df.columns]
+
+    styled = fish_df[display_cols].style.map(
+        color_stress, subset=["stress_level"]
+    )
+    st.dataframe(styled, width="stretch", hide_index=True)
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Fish analysed", fish_data.get("fish_count", 0))
+    col2.metric("Critical fish",  fish_data.get("critical_count", 0))
+    col3.metric("Avg stress",     f"{fish_data.get('avg_stress', 0):.3f}")
+else:
+    st.info("No per-fish data yet. Waiting for CV module output...")
+
+st.divider()
+
+# ── Row 4: Alerts panel ───────────────────────────────────────────────────────
 col_active, col_stats = st.columns([2, 1])
 
 with col_active:
@@ -372,15 +452,57 @@ with col_stats:
 
 st.divider()
 
-# ── Row 4: Raw data table ─────────────────────────────────────────────────────
+# ── Row 5: Raw data table ─────────────────────────────────────────────────────
 with st.expander("🗃 Raw sensor data table"):
     if readings:
         df = pd.DataFrame(readings)
         df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.strftime("%Y-%m-%d %H:%M:%S")
         display_cols = [c for c in ["timestamp", "temperature", "ph", "dissolved_o2", "ammonia"] if c in df.columns]
-        st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
+        st.dataframe(df[display_cols], width="stretch", hide_index=True)
     else:
         st.info("No data to display.")
+
+st.divider()
+
+# ── Row 6: Recommendations ───────────────────────────────────────────────────
+st.subheader("📋 Recommendations")
+
+recommendation = get_recommendation(stress_level, alert_types, fish_data)
+box_color = {"critical": "#FCEBEB", "warning": "#FAEEDA", "normal": "#E1F5EE"}.get(stress_level, "#F8F9FA")
+st.markdown(
+    f'<div style="background:{box_color};padding:16px;border-radius:8px;white-space:pre-line;">{recommendation}</div>',
+    unsafe_allow_html=True
+)
+
+st.divider()
+
+# ── Row 7: Export report ──────────────────────────────────────────────────────
+st.subheader("📤 Export Report")
+
+col_export1, col_export2 = st.columns(2)
+
+with col_export1:
+    if readings:
+        df_export = pd.DataFrame(readings)
+        df_export["timestamp"] = pd.to_datetime(df_export["timestamp"])
+        csv = df_export.to_csv(index=False)
+        st.download_button(
+            label="📥 Download sensor data (CSV)",
+            data=csv,
+            file_name=f"sensor_data_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv"
+        )
+
+with col_export2:
+    if fish_data and fish_data.get("fish"):
+        df_fish = pd.DataFrame(fish_data["fish"])
+        csv_fish = df_fish.to_csv(index=False)
+        st.download_button(
+            label="📥 Download fish stress (CSV)",
+            data=csv_fish,
+            file_name=f"fish_stress_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv"
+        )
 
 # ── Auto-refresh ──────────────────────────────────────────────────────────────
 if auto_refresh:
